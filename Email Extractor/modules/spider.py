@@ -135,3 +135,63 @@ class Spider:
                     to_visit.append((link, depth + 1))
                     
         return all_emails
+        
+    def _prioritize_links(self, links: List[str]) -> List[Tuple[str, int]]:
+        """
+        Prioritize links that are likely to contain contact information
+        
+        Args:
+            links (List[str]): List of links to prioritize
+            
+        Returns:
+            List[Tuple[str, int]]: List of (link, priority) tuples
+        """
+        prioritized = []
+        
+        # Keywords that suggest contact information
+        contact_keywords = [
+            'contact', 'kontakt', 'impressum', 'about', 'about-us', 'about_us',
+            'aboutus', 'uber-uns', 'ueber-uns', 'imprint', 'team', 'staff',
+            'people', 'company', 'support', 'help', 'reach', 'touch'
+        ]
+        
+        for link in links:
+            # Default priority
+            priority = 0
+            
+            # Increase priority for links that might contain contact information
+            lower_link = link.lower()
+            
+            # Check for contact keywords in the URL
+            for keyword in contact_keywords:
+                if keyword in lower_link:
+                    priority += 5
+                    break
+                    
+            # Prioritize shorter URLs (often main section pages)
+            url_length = len(link)
+            if url_length < 30:
+                priority += 3
+            elif url_length < 50:
+                priority += 2
+            elif url_length < 70:
+                priority += 1
+                
+            # Prioritize URLs with fewer path segments
+            path_segments = link.split('/')
+            if len(path_segments) <= 4:
+                priority += 2
+            elif len(path_segments) <= 5:
+                priority += 1
+                
+            # Deprioritize URLs with query parameters (often dynamic content)
+            if '?' in link:
+                priority -= 2
+                
+            # Deprioritize URLs with fragments (often within-page links)
+            if '#' in link:
+                priority -= 1
+                
+            prioritized.append((link, priority))
+            
+        return prioritized

@@ -29,12 +29,21 @@ class EmailParser:
         if not text:
             return set()
             
+        # Clean the text by replacing HTML entities
+        cleaned_text = self._clean_html_entities(text)
+        
         # Find all potential email matches
-        potential_emails = self.email_pattern.findall(text)
+        potential_emails = self.email_pattern.findall(cleaned_text)
+        
+        # Find obfuscated emails
+        obfuscated_emails = self._extract_obfuscated_emails(cleaned_text)
+        
+        # Combine all potential emails
+        all_potential_emails = potential_emails + obfuscated_emails
         
         # Filter and clean the results
         valid_emails = set()
-        for email in potential_emails:
+        for email in all_potential_emails:
             # Skip if it matches exclusion patterns
             if self.exclusion_pattern.search(email):
                 continue
@@ -103,6 +112,75 @@ class EmailParser:
             
         return True
         
+    def _clean_html_entities(self, text: str) -> str:
+        """
+        Clean HTML entities in text
+        
+        Args:
+            text (str): The text to clean
+            
+        Returns:
+            str: The cleaned text
+        """
+        # Replace common HTML entities
+        for entity, replacement in self.obfuscation_replacements.items():
+            text = text.replace(entity, replacement)
+            
+        # Replace numeric HTML entities (e.g., &#64; for @)
+        def replace_entity(match):
+            try:
+                return chr(int(match.group(0)[2:-1]))
+            except:
+                return match.group(0)
+                
+        text = self.html_entity_pattern.sub(replace_entity, text)
+        
+        return text
+
+    def _extract_obfuscated_emails(self, text: str) -> List[str]:
+        """
+        Extract emails that are obfuscated in various ways
+        
+        Args:
+            text (str): The text to extract obfuscated emails from
+            
+        Returns:
+            List[str]: A list of extracted email addresses
+        """
+        emails = []
+        
+        # Find obfuscated emails using the pattern
+        matches = self.obfuscated_pattern.findall(text)
+        
+        for match in matches:
+            if match and len(match) == 3:
+                # Construct the email from the parts
+                email = f"{match[0]}@{match[1]}.{match[2]}"
+                emails.append(email)
+                
+        # Look for JavaScript obfuscation patterns
+        # Example: var email = 'user' + '@' + 'domain.com';
+        js_pattern = re.compile(r"['\"]([a-zA-Z0-9._%+\-]+)['\"][\s]*\+[\s]*['\"]@['\"][\s]*\+[\s]*['\"]([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})['\"]")
+        js_matches = js_pattern.findall(text)
+        
+        for match in js_matches:
+            if match and len(match) == 2:
+                email = f"{match[0]}@{match[1]}"
+                emails.append(email)
+                
+        # Look for CSS obfuscation
+        # Example: <span class="user">user</span><span class="at">@</span><span class="domain">domain.com</span>
+        # This is harder to detect with regex alone, but we can try some common patterns
+        css_pattern = re.compile(r'<span[^>]*>([a-zA-Z0-9._%+\-]+)</span><span[^>]*>@</span><span[^>]*>([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})</span>')
+        css_matches = css_pattern.findall(text)
+        
+        for match in css_matches:
+            if match and len(match) == 2:
+                email = f"{match[0]}@{match[1]}"
+                emails.append(email)
+                
+        return emails
+        
     def extract_emails_from_impressum(self, text: str) -> Set[str]:
         """
         Special extraction for Impressum pages (common in German-speaking regions)
@@ -114,16 +192,31 @@ class EmailParser:
         Returns:
             Set[str]: A set of unique valid email addresses
         """
+        # Get standard emails
         emails = self.extract_emails(text)
         
-        # Look for email addresses written in text form (e.g., "name (at) domain (dot) com")
-        text_form_pattern = re.compile(r'([a-zA-Z0-9._%+-]+)[\s]*(?:\[at\]|\(at\)|@|&#64;|&#9090;|at)[\s]*([a-zA-Z0-9.-]+)[\s]*(?:\[dot\]|\(dot\)|\.|\.|dot)[\s]*([a-zA-Z]{2,})')
+        # Look for specific patterns common in Impressum pages
         
-        matches = text_form_pattern.findall(text)
+        # Pattern for "E-Mail: " followed by an email or obfuscated email
+        email_label_pattern = re.compile(r'(?:E-Mail|Email|E-mail|Mail|Mailto|Kontakt|Contact)[\s]*:[\s]*([^\n<]+)', re.IGNORECASE)
+        
+        matches = email_label_pattern.findall(text)
         for match in matches:
-            if match and len(match) == 3:
-                constructed_email = f"{match[0]}@{match[1]}.{match[2]}"
-                if self._validate_email(constructed_email):
-                    emails.add(constructed_email.lower())
-                    
+            # Clean the match
+            cleaned_match = match.strip()
+            
+            # Check if it's already an email
+            if '@' in cleaned_match and '.' in cleaned_match:
+                potential_email = cleaned_match
+                # Clean the email
+                potential_email = self._clean_email(potential_email)
+                if self._validate_email(potential_email):
+                    emails.add(potential_email.lower())
+            else:
+                # It might be an obfuscated email
+                obfuscated_emails = self._extract_obfuscated_emails(cleaned_match)
+                for email in obfuscated_emails:
+                    if self._validate_email(email):
+                        emails.add(email.lower())
+                        
         return emails

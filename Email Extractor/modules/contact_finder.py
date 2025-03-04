@@ -143,7 +143,7 @@ class ContactFinder:
         
     def generate_common_contact_urls(self, base_url: str) -> List[str]:
         """
-        Generate common contact page URLs based on the base URL
+        Generate common contact page URLs based on the base URL and detected language
         
         Args:
             base_url (str): The base URL of the website
@@ -159,7 +159,7 @@ class ContactFinder:
         if base_url.endswith('/'):
             base_url = base_url[:-1]
             
-        # Determine the likely language based on the TLD
+        # Determine the likely language based on the URL
         language = self._detect_language(base_url)
         
         # Get language-specific paths
@@ -167,13 +167,35 @@ class ContactFinder:
         if language in self.contact_keywords:
             language_paths = [f'/{keyword}' for keyword in self.contact_keywords[language]]
             
+        # Add paths with language prefix for international sites
+        # For example: /en/contact, /de/kontakt, etc.
+        international_paths = []
+        for lang, keywords in self.contact_keywords.items():
+            if lang != 'generic':
+                for keyword in keywords[:3]:  # Limit to first 3 keywords per language
+                    international_paths.append(f'/{lang}/{keyword}')
+                    
         # Combine with common paths
-        all_paths = self.common_contact_paths + language_paths
+        all_paths = self.common_contact_paths + language_paths + international_paths
         
-        # Generate full URLs
+        # Add variations with common prefixes and suffixes
+        variations = []
+        prefixes = ['', '/about/', '/company/', '/info/']
+        suffixes = ['', '.html', '.php', '.aspx', '/index.html']
+        
+        for path in language_paths[:5]:  # Limit to first 5 language-specific paths
+            for prefix in prefixes:
+                for suffix in suffixes:
+                    if not path.startswith('/'):
+                        path = '/' + path
+                    variations.append(f"{prefix}{path}{suffix}")
+                    
+        # Generate full URLs, removing duplicates
+        all_paths = list(set(all_paths + variations))
         contact_urls = [f"{base_url}{path}" for path in all_paths]
         
-        return contact_urls
+        # Limit the number of URLs to avoid excessive requests
+        return contact_urls[:30]  # Return up to 30 potential contact URLs
         
     def _detect_language(self, url: str) -> str:
         """

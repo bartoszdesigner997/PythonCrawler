@@ -1,4 +1,22 @@
-#!/usr/bin/env python3
+    def _normalize_url(self, url: str) -> str:
+        """
+        Normalize a URL by ensuring it has a scheme and removing trailing slashes
+        
+        Args:
+            url (str): The URL to normalize
+            
+        Returns:
+            str: The normalized URL
+        """
+        # Add scheme if missing
+        if not url.startswith(('http://', 'https://')):
+            url = f'https://{url}'
+            
+        # Remove trailing slash
+        if url.endswith('/'):
+            url = url[:-1]
+            
+        return url
 # Email Extractor - Main Script
 # Orchestrates the email extraction process
 
@@ -28,21 +46,27 @@ logging.basicConfig(
 )
 
 class EmailExtractor:
-    def __init__(self, concurrency: int = 10):
+    def __init__(self, concurrency: int = 20, timeout: int = 60, batch_size: int = 50):
         """
         Initialize the Email Extractor
         
         Args:
             concurrency (int): Maximum number of concurrent URL processing tasks
+            timeout (int): Timeout in seconds for processing a single URL
+            batch_size (int): Number of URLs to process in each batch
         """
         self.concurrency = concurrency
+        self.timeout = timeout
+        self.batch_size = batch_size
         self.email_parser = EmailParser()
         self.http_extractor = HttpExtractor()
         self.contact_finder = ContactFinder()
-        self.spider = Spider()
-        self.playwright_extractor = PlaywrightExtractor()
+        self.spider = Spider(max_pages=30, timeout=timeout, max_time_per_domain=300)
+        self.playwright_extractor = PlaywrightExtractor(timeout=timeout)
         self.cache_file = 'email_cache.json'
         self.email_cache = self._load_cache()
+        self.processed_urls = set()  # Track processed URLs to avoid duplicates
+        self.start_time = None
         
     def _load_cache(self) -> Dict[str, List[str]]:
         """
@@ -192,7 +216,7 @@ class EmailExtractor:
         
     async def process_urls(self, urls: List[str]) -> Dict[str, Set[str]]:
         """
-        Process multiple URLs with controlled concurrency
+        Process multiple URLs with controlled concurrency and batch processing
         
         Args:
             urls (List[str]): The URLs to process
@@ -200,17 +224,54 @@ class EmailExtractor:
         Returns:
             Dict[str, Set[str]]: A dictionary mapping URLs to extracted emails
         """
-        results = {}
+        self.start_time = time.time()
         
-        # Process URLs in batches to control concurrency
-        for i in range(0, len(urls), self.concurrency):
-            batch = urls[i:i + self.concurrency]
-            tasks = [self.process_url(url) for url in batch]
-            batch_results = await asyncio.gather(*tasks)
+        # Remove duplicates while preserving order
+        unique_urls = []
+        seen = set()
+        for url in urls:
+            normalized_url = self._normalize_url(url)
+            if normalized_url not in seen and normalized_url not in self.processed_urls:
+                seen.add(normalized_url)
+                unique_urls.append(normalized_url)
+        
+        total_urls = len(unique_urls)
+        results = {}
+        processed_count = 0
+        
+        # Process URLs in batches to control memory usage
+        for i in range(0, total_urls, self.batch_size):
+            batch = unique_urls[i:i + self.batch_size]
             
-            for url, emails in zip(batch, batch_results):
+            # Create a semaphore to limit concurrency
+            semaphore = asyncio.Semaphore(self.concurrency)
+            
+            async def process_with_semaphore(url):
+                async with semaphore:
+                    return url, await self.process_url(url)
+            
+            # Create tasks for all URLs in the batch
+            tasks = [process_with_semaphore(url) for url in batch]
+            
+            # Process the batch
+            for completed in asyncio.as_completed(tasks):
+                url, emails = await completed
                 results[url] = emails
+                processed_count += 1
                 
+                # Report progress
+                elapsed = time.time() - self.start_time
+                emails_found = sum(len(e) for e in results.values())
+                progress = (processed_count / total_urls) * 100
+                
+                logging.info(f"Progress: {processed_count}/{total_urls} URLs ({progress:.1f}%) - "
+                             f"Found {emails_found} emails - "
+                             f"Elapsed: {elapsed:.1f}s")
+                
+                # Save intermediate results periodically
+                if processed_count % 10 == 0:
+                    self._save_cache()
+                    
         return results
         
     async def close(self):
@@ -246,15 +307,20 @@ async def main():
     """
     Main function
     """
+    import time
+    
     print("=== Email Extractor ===")
     print("Enter URLs one per line. Submit an empty line or 'END' to start processing.")
     
     urls = []
     while True:
-        line = input().strip()
-        if not line or line.upper() == 'END':
+        try:
+            line = input().strip()
+            if not line or line.upper() == 'END':
+                break
+            urls.append(line)
+        except EOFError:
             break
-        urls.append(line)
         
     if not urls:
         print("No URLs provided. Exiting.")
@@ -262,25 +328,45 @@ async def main():
         
     print(f"Processing {len(urls)} URLs...")
     
-    extractor = EmailExtractor()
+    # Create extractor with appropriate concurrency based on URL count
+    concurrency = min(20, len(urls))  # Limit concurrency to avoid overwhelming the system
+    extractor = EmailExtractor(concurrency=concurrency)
+    
+    start_time = time.time()
     
     try:
         results = await extractor.process_urls(urls)
         
+        # Calculate statistics
+        elapsed_time = time.time() - start_time
+        total_urls = len(urls)
+        successful_urls = len(results)
+        total_emails = sum(len(emails) for emails in results.values())
+        unique_emails = len(set().union(*results.values())) if results else 0
+        
         # Print summary
         print("\n=== Results ===")
-        total_emails = 0
+        print(f"Processed {successful_urls}/{total_urls} URLs in {elapsed_time:.1f} seconds")
+        print(f"Average time per URL: {elapsed_time/total_urls:.2f} seconds")
+        
         for url, emails in results.items():
             email_count = len(emails)
-            total_emails += email_count
-            print(f"{url}: {email_count} emails")
+            if email_count > 0:
+                print(f"{url}: {email_count} emails")
             
-        print(f"\nTotal unique emails found: {total_emails}")
+        print(f"\nTotal emails found: {total_emails}")
+        print(f"Unique emails found: {unique_emails}")
         
         # Save results
         extractor.save_results(results)
         print("Emails saved to output.txt")
         
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user. Saving partial results...")
+        # Save partial results if available
+        if 'results' in locals() and results:
+            extractor.save_results(results)
+            print("Partial results saved to output.txt")
     finally:
         await extractor.close()
         
